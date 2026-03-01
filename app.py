@@ -1,243 +1,478 @@
 import dash
-from dash import dcc, html, Input, Output, dash_table
+from dash import dcc, html, Input, Output, dash_table, callback
 import plotly.graph_objects as go
 import pandas as pd
+import numpy as np
 
-CSV_PATH = "hydroponics_data.csv"
+from data_layer import clean_data, resample_data
+from intelligence import detect_anomalies, health_score, generate_insight
 
-df = pd.read_csv(CSV_PATH)
-df["timestamp"] = pd.to_datetime(df["timestamp"])
-df = df.sort_values("timestamp").reset_index(drop=True)
-df["date"] = df["timestamp"].dt.date
+DATA_FILE = "hydroponics_data.csv"
 
-# columns สำหรับกราฟ (3 อัน)
-GRAPH_COLS = ["pH", "TDS", "water_temp"]
+BG          = "#0F172A"
+BG_ALT      = "#111827"
+CARD        = "#1F2937"
+CARD_BORDER = "#374151"
+GREEN       = "#22C55E"
+GREEN_ACCENT = "#16A34A"
+RED         = "#EF4444"
+AMBER       = "#F59E0B"
+MUTED       = "#9CA3AF"
+WHITE       = "#F9FAFB"
+CYAN        = "#06B6D4"
 
-# columns สำหรับตารางรายวัน (ทุก column)
-TABLE_COLS = ["id", "timestamp", "pH", "TDS", "water_level",
-              "DHT_temp", "DHT_humidity", "water_temp",
-              "pH_reducer", "add_water", "nutrients_adder", "humidifier", "ex_fan"]
+DF_CLEAN = clean_data(DATA_FILE)
 
-all_dates    = sorted(df["date"].unique())
-date_options = [{"label": str(d), "value": str(d)} for d in all_dates]
+app = dash.Dash(
+    __name__,
+    title="Hydroponics AI Platform",
+    update_title="Loading…",
+    meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}],
+)
+server = app.server  # for production WSGI
 
-CHARTS = [
-    {"col": "pH",         "color": "#3B82F6", "unit": "",     "label": "pH"},
-    {"col": "TDS",        "color": "#F59E0B", "unit": " ppm", "label": "TDS (ppm)"},
-    {"col": "water_temp", "color": "#10B981", "unit": " °C",  "label": "Water Temp (°C)"},
-]
+card_style = {
+    "background": CARD,
+    "borderRadius": "16px",
+    "padding": "24px",
+    "border": f"1px solid {CARD_BORDER}",
+}
 
-app = dash.Dash(__name__)
-app.title = "Hydro Sensor Dashboard"
+kpi_card_style = {
+    **card_style,
+    "flex": "1",
+    "minWidth": "200px",
+    "textAlign": "center",
+}
 
+
+def _kpi_card(title, value_id, icon="", extra_style=None):
+    """Factory for a single KPI card."""
+    s = {**kpi_card_style}
+    if extra_style:
+        s.update(extra_style)
+    return html.Div(
+        style=s,
+        children=[
+            html.P(
+                f"{icon}  {title}" if icon else title,
+                style={"color": MUTED, "fontSize": "13px", "marginBottom": "8px",
+                       "letterSpacing": "0.5px", "textTransform": "uppercase"},
+            ),
+            html.H2(id=value_id, style={"color": WHITE, "margin": "0", "fontSize": "28px",
+                                         "fontWeight": "700"}),
+        ],
+    )
+
+# LAYOUT
 app.layout = html.Div(
-    style={"fontFamily": "Inter, sans-serif", "background": "#F1F5F9", "minHeight": "100vh", "padding": "32px"},
+    style={
+        "fontFamily": "'Inter', 'Segoe UI', system-ui, sans-serif",
+        "background": BG,
+        "minHeight": "100vh",
+        "padding": "0",
+        "color": WHITE,
+    },
     children=[
+        html.Link(
+            rel="stylesheet",
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap",
+        ),
+
         html.Div(
-            style={"maxWidth": "1100px", "margin": "0 auto"},
+            style={"maxWidth": "1320px", "margin": "0 auto", "padding": "32px 24px"},
             children=[
-
-                # ── Header ──────────────────────────────────────────
                 html.Div(
                     style={
-                        "background": "white", "borderRadius": "16px",
-                        "padding": "24px 32px", "marginBottom": "24px",
-                        "boxShadow": "0 1px 3px rgba(0,0,0,0.08)",
-                    },
-                    children=[
-                        html.H1("🌿 Hydro Sensor Dashboard",
-                                style={"margin": 0, "fontSize": "24px", "color": "#1E293B"}),
-                        html.P(
-                            f"ข้อมูล {len(df):,} รายการ  |  "
-                            f"{df['timestamp'].min().strftime('%d %b %Y')} – "
-                            f"{df['timestamp'].max().strftime('%d %b %Y')}",
-                            style={"margin": "6px 0 0", "color": "#64748B", "fontSize": "14px"},
-                        ),
-                    ],
-                ),
-
-                # ── Resample control ────────────────────────────────
-                html.Div(
-                    style={
-                        "background": "white", "borderRadius": "16px",
-                        "padding": "20px 32px", "marginBottom": "24px",
-                        "boxShadow": "0 1px 3px rgba(0,0,0,0.08)",
                         "display": "flex", "alignItems": "center",
+                        "justifyContent": "space-between",
+                        "marginBottom": "32px", "flexWrap": "wrap", "gap": "16px",
                     },
                     children=[
-                        html.Label("Resample", style={
-                            "fontWeight": "600", "fontSize": "13px",
-                            "color": "#374151", "marginRight": "16px",
-                        }),
-                        dcc.RadioItems(
-                            id="resample",
-                            options=[
-                                {"label": " ทั้งหมด",    "value": "all"},
-                                {"label": " รายชั่วโมง", "value": "1h"},
-                                {"label": " รายวัน",     "value": "1D"},
-                            ],
-                            value="all",
-                            inline=True,
-                            labelStyle={"marginRight": "16px", "fontSize": "14px"},
-                        ),
-                    ],
-                ),
-
-                # ── 3 กราฟ (pH, TDS, water_temp) ───────────────────
-                html.Div(id="charts-container"),
-
-                # ── ตารางข้อมูลรายวัน (ทุก column) ─────────────────
-                html.Div(
-                    style={
-                        "background": "white", "borderRadius": "16px",
-                        "padding": "20px 32px", "marginTop": "24px",
-                        "boxShadow": "0 1px 3px rgba(0,0,0,0.08)",
-                    },
-                    children=[
+                        html.Div(children=[
+                            html.H1(
+                                "Hydroponics AI Monitoring Platform",
+                                style={
+                                    "margin": "0", "fontSize": "26px",
+                                    "fontWeight": "700", "color": WHITE,
+                                    "letterSpacing": "-0.5px",
+                                },
+                            ),
+                            html.P(
+                                "Real-time sensor analytics & anomaly detection",
+                                style={"margin": "4px 0 0", "fontSize": "14px",
+                                       "color": MUTED},
+                            ),
+                        ]),
                         html.Div(
                             style={
                                 "display": "flex", "alignItems": "center",
-                                "justifyContent": "space-between",
-                                "marginBottom": "16px", "flexWrap": "wrap", "gap": "12px",
+                                "gap": "8px",
                             },
                             children=[
-                                html.H3("ข้อมูลรายวัน",
-                                        style={"margin": 0, "fontSize": "15px", "color": "#1E293B"}),
                                 html.Div(
-                                    style={"display": "flex", "alignItems": "center", "gap": "10px"},
-                                    children=[
-                                        html.Label("เลือกวันที่:", style={
-                                            "fontSize": "13px", "color": "#64748B", "fontWeight": "600",
-                                        }),
-                                        dcc.Dropdown(
-                                            id="date-picker",
-                                            options=date_options,
-                                            value=str(all_dates[0]),
-                                            clearable=False,
-                                            style={"width": "180px", "fontSize": "13px"},
-                                        ),
-                                    ],
+                                    style={
+                                        "width": "10px", "height": "10px",
+                                        "borderRadius": "50%", "background": GREEN,
+                                        "boxShadow": f"0 0 8px {GREEN}",
+                                    },
+                                ),
+                                html.Span("System Online", style={"fontSize": "13px",
+                                                                    "color": GREEN,
+                                                                    "fontWeight": "600"}),
+                            ],
+                        ),
+                    ],
+                ),
+
+                html.Div(
+                    style={"display": "flex", "gap": "16px", "marginBottom": "24px",
+                           "flexWrap": "wrap"},
+                    children=[
+                        _kpi_card("Health Score", "kpi-health", "💚"),
+                        _kpi_card("Active Anomalies", "kpi-anomalies", "🔴"),
+                        _kpi_card("Stability Index", "kpi-stability", "📊"),
+                        _kpi_card("Last Reading", "kpi-timestamp", "🕐"),
+                    ],
+                ),
+
+                html.Div(
+                    style={
+                        **card_style,
+                        "marginBottom": "24px",
+                        "display": "flex", "alignItems": "center",
+                        "gap": "24px", "flexWrap": "wrap",
+                    },
+                    children=[
+                        html.Div(
+                            style={"flex": "1", "minWidth": "260px"},
+                            children=[
+                                html.Label("Date Range", style={
+                                    "fontSize": "12px", "color": MUTED,
+                                    "textTransform": "uppercase", "letterSpacing": "0.5px",
+                                    "marginBottom": "8px", "display": "block",
+                                }),
+                                dcc.DatePickerRange(
+                                    id="date-range",
+                                    min_date_allowed=DF_CLEAN.index.min().date(),
+                                    max_date_allowed=DF_CLEAN.index.max().date(),
+                                    start_date=DF_CLEAN.index.min().date(),
+                                    end_date=DF_CLEAN.index.max().date(),
+                                    style={"fontSize": "13px"},
                                 ),
                             ],
                         ),
-                        html.Div(id="record-count",
-                                 style={"fontSize": "13px", "color": "#64748B", "marginBottom": "10px"}),
-                        html.Div(id="date-table"),
+                        html.Div(
+                            style={"minWidth": "180px"},
+                            children=[
+                                html.Label("Resampling", style={
+                                    "fontSize": "12px", "color": MUTED,
+                                    "textTransform": "uppercase", "letterSpacing": "0.5px",
+                                    "marginBottom": "8px", "display": "block",
+                                }),
+                                dcc.Dropdown(
+                                    id="resample-freq",
+                                    options=[
+                                        {"label": "Raw Data", "value": "raw"},
+                                        {"label": "5 Minutes", "value": "5min"},
+                                        {"label": "15 Minutes", "value": "15min"},
+                                        {"label": "1 Hour", "value": "1H"},
+                                    ],
+                                    value="raw",
+                                    clearable=False,
+                                    style={
+                                        "background": BG_ALT,
+                                        "color": WHITE,
+                                        "border": "none",
+                                        "borderRadius": "8px",
+                                        "fontSize": "13px",
+                                    },
+                                ),
+                            ],
+                        ),
                     ],
+                ),
+
+                dcc.Loading(
+                    type="dot",
+                    color=GREEN,
+                    children=html.Div(id="charts-section"),
+                ),
+
+                dcc.Loading(
+                    type="dot",
+                    color=GREEN,
+                    children=html.Div(
+                        id="insight-panel",
+                        style={
+                            **card_style,
+                            "marginTop": "24px",
+                            "borderLeft": f"4px solid {GREEN}",
+                        },
+                    ),
+                ),
+
+                dcc.Loading(
+                    type="dot",
+                    color=GREEN,
+                    children=html.Div(
+                        id="events-section",
+                        style={**card_style, "marginTop": "24px"},
+                    ),
+                ),
+
+                html.Div(
+                    style={"textAlign": "center", "padding": "32px 0 8px",
+                           "fontSize": "12px", "color": MUTED},
+                    children="Hydroponics AI Monitoring Platform · Built with Dash & Plotly",
                 ),
             ],
         ),
     ],
 )
 
+def _prepare(start_date, end_date, freq):
+    """Slice, resample, and detect anomalies — shared by all callbacks."""
+    df = DF_CLEAN.copy()
+    if start_date:
+        df = df[df.index >= pd.Timestamp(start_date)]
+    if end_date:
+        df = df[df.index <= pd.Timestamp(end_date) + pd.Timedelta(days=1)]
+    df = resample_data(df, freq)
+    df = detect_anomalies(df)
+    return df
 
-# ── Callback: กราฟ (ใช้แค่ GRAPH_COLS) ─────────────────────
+# CHART BUILDER
+CHART_CONFIG = [
+    {"col": "pH",         "title": "pH Level",           "unit": "",    "color": GREEN,  "anomaly": "pH_anomaly"},
+    {"col": "TDS",        "title": "TDS (ppm)",          "unit": " ppm","color": CYAN,   "anomaly": "TDS_anomaly"},
+    {"col": "water_temp", "title": "Water Temperature",  "unit": " °C", "color": AMBER,  "anomaly": "temp_anomaly"},
+]
+
+
+def _build_chart(df, cfg):
+    """Build a single dark-themed time-series chart with anomaly markers."""
+    col = cfg["col"]
+    if col not in df.columns:
+        return html.Div()
+
+    fig = go.Figure()
+
+    # Main line
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df[col],
+        mode="lines",
+        name=cfg["title"],
+        line=dict(color=cfg["color"], width=2),
+        hovertemplate=f"%{{x|%Y-%m-%d %H:%M}}<br>{cfg['title']}: %{{y:.2f}}{cfg['unit']}<extra></extra>",
+    ))
+
+    # Anomaly markers
+    anomaly_col = cfg["anomaly"]
+    if anomaly_col in df.columns:
+        anom = df[df[anomaly_col]]
+        if not anom.empty:
+            fig.add_trace(go.Scatter(
+                x=anom.index, y=anom[col],
+                mode="markers",
+                name="Anomaly",
+                marker=dict(color=RED, size=7, symbol="circle",
+                            line=dict(color="#fff", width=1)),
+                hovertemplate=f"%{{x|%Y-%m-%d %H:%M}}<br>⚠ Anomaly: %{{y:.2f}}{cfg['unit']}<extra></extra>",
+            ))
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=CARD,
+        plot_bgcolor=CARD,
+        font=dict(family="Inter, sans-serif", color=MUTED, size=12),
+        title=dict(text=cfg["title"], font=dict(size=15, color=WHITE),
+                   x=0.02, y=0.95),
+        margin=dict(l=48, r=24, t=48, b=40),
+        height=280,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="right", x=1, font=dict(size=11),
+        ),
+        xaxis=dict(
+            gridcolor="#2D3748", gridwidth=0.5,
+            showgrid=True, zeroline=False,
+        ),
+        yaxis=dict(
+            gridcolor="#2D3748", gridwidth=0.5,
+            showgrid=True, zeroline=False,
+            title=dict(text=f"{cfg['title']}{cfg['unit']}", font=dict(size=11)),
+        ),
+        hovermode="x unified",
+    )
+    return dcc.Graph(figure=fig, config={"displayModeBar": False})
+
+
+# CALLBACKS
+
 @app.callback(
-    Output("charts-container", "children"),
-    Input("resample", "value"),
+    Output("kpi-health", "children"),
+    Output("kpi-anomalies", "children"),
+    Output("kpi-stability", "children"),
+    Output("kpi-timestamp", "children"),
+    Output("charts-section", "children"),
+    Output("insight-panel", "children"),
+    Output("events-section", "children"),
+    Input("date-range", "start_date"),
+    Input("date-range", "end_date"),
+    Input("resample-freq", "value"),
 )
-def update_charts(resample):
-    if resample == "all":
-        plot_df = df[["timestamp"] + GRAPH_COLS].copy()
-    else:
-        plot_df = (
-            df.set_index("timestamp")[GRAPH_COLS]
-            .resample(resample).mean().dropna().reset_index()
-        )
+def update_dashboard(start_date, end_date, freq):
+    """Single callback that updates every component for consistent state."""
+    df = _prepare(start_date, end_date, freq)
 
-    charts = []
-    for cfg in CHARTS:
-        col   = cfg["col"]
-        color = cfg["color"]
-        unit  = cfg["unit"]
-        label = cfg["label"]
+    # ── KPIs ────────────────────────────────────────────────
+    health = health_score(df)
+    score = health["score"]
+    status = health["system_status"]
 
-        y_vals = plot_df[col]
-        y_mean = y_vals.mean()
-        y_min  = y_vals.min()
-        y_max  = y_vals.max()
+    # Color based on status
+    status_color = GREEN if status == "Healthy" else AMBER if status == "Warning" else RED
 
-        r, g, b = int(color[1:3],16), int(color[3:5],16), int(color[5:7],16)
+    kpi_health_val = html.Span([
+        html.Span(f"{score}", style={"color": status_color}),
+        html.Span(f" / 100", style={"fontSize": "14px", "color": MUTED}),
+    ])
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=plot_df["timestamp"], y=y_vals,
-            mode="lines",
-            line=dict(color=color, width=2.5),
-            hovertemplate=f"<b>{col}</b><br>%{{x|%d %b %Y %H:%M}}<br>%{{y:.2f}}{unit}<extra></extra>",
-            fill="tozeroy",
-            fillcolor=f"rgba({r},{g},{b},0.08)",
-        ))
-        fig.add_hline(
-            y=y_mean, line_dash="dot", line_color="#94A3B8",
-            annotation_text=f"avg {y_mean:.2f}{unit}",
-            annotation_font_color="#64748B", annotation_font_size=11,
-        )
-        fig.update_layout(
-            title=dict(
-                text=(f"<b>{label}</b>   "
-                      f"<span style='font-size:13px;color:#64748B'>"
-                      f"min {y_min:.2f}  |  max {y_max:.2f}  |  avg {y_mean:.2f}{unit}</span>"),
-                font=dict(size=15, color="#1E293B"), x=0,
-            ),
-            xaxis=dict(showgrid=True, gridcolor="#F1F5F9",
-                       tickfont=dict(color="#94A3B8", size=11), linecolor="#E2E8F0"),
-            yaxis=dict(
-                title=dict(text=label, font=dict(color="#64748B", size=12)),
-                showgrid=True, gridcolor="#F1F5F9",
-                tickfont=dict(color="#94A3B8", size=11), linecolor="#E2E8F0",
-            ),
-            plot_bgcolor="white", paper_bgcolor="white",
-            margin=dict(l=60, r=30, t=50, b=40),
-            height=260, showlegend=False, hovermode="x unified",
-        )
-        charts.append(html.Div(
-            style={
-                "background": "white", "borderRadius": "16px", "marginBottom": "20px",
-                "boxShadow": "0 1px 3px rgba(0,0,0,0.08)", "overflow": "hidden",
-                "borderLeft": f"4px solid {color}",
-            },
-            children=[dcc.Graph(figure=fig, config={"displayModeBar": False})],
-        ))
-    return charts
+    anomaly_cols = ["pH_anomaly", "TDS_anomaly", "temp_anomaly"]
+    total_anomalies = sum(
+        int(df[c].sum()) for c in anomaly_cols if c in df.columns
+    )
+    anom_color = GREEN if total_anomalies == 0 else RED
+    kpi_anomalies_val = html.Span(
+        str(total_anomalies),
+        style={"color": anom_color},
+    )
 
+    avg_stability = round(
+        (health["ph_stability"] + health["tds_stability"] + health["temp_stability"]) / 3,
+        1,
+    )
+    kpi_stability_val = html.Span([
+        html.Span(f"{avg_stability}%", style={"color": WHITE}),
+    ])
 
-# ── Callback: ตารางรายวัน (ทุก column) ──────────────────────
-@app.callback(
-    Output("date-table", "children"),
-    Output("record-count", "children"),
-    Input("date-picker", "value"),
-)
-def update_table(selected_date):
-    filtered = df[df["date"] == pd.to_datetime(selected_date).date()].copy()
-    filtered = filtered[TABLE_COLS].reset_index(drop=True)
-    filtered["timestamp"] = filtered["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    last_ts = df.index.max()
+    kpi_ts_val = html.Span(
+        last_ts.strftime("%b %d, %H:%M") if pd.notna(last_ts) else "—",
+        style={"fontSize": "18px", "color": WHITE},
+    )
 
-    count_text = f"พบ {len(filtered):,} รายการ ในวันที่ {selected_date}"
-
-    table = dash_table.DataTable(
-        data=filtered.to_dict("records"),
-        columns=[{"name": c, "id": c} for c in filtered.columns],
-        page_size=25,
-        sort_action="native",
-        filter_action="native",
-        style_table={"overflowX": "auto"},
-        style_header={
-            "backgroundColor": "#F8FAFC", "fontWeight": "700",
-            "fontSize": "13px", "color": "#374151",
-            "border": "1px solid #E2E8F0", "padding": "10px 14px",
-        },
-        style_cell={
-            "fontSize": "13px", "color": "#334155",
-            "border": "1px solid #F1F5F9", "padding": "9px 14px",
-            "fontFamily": "Inter, sans-serif", "whiteSpace": "normal",
-        },
-        style_data_conditional=[
-            {"if": {"row_index": "odd"}, "backgroundColor": "#F8FAFC"},
+    charts = html.Div(
+        style={"display": "grid", "gridTemplateColumns": "1fr",
+               "gap": "16px"},
+        children=[
+            html.Div(style=card_style, children=_build_chart(df, cfg))
+            for cfg in CHART_CONFIG
         ],
     )
-    return table, count_text
 
+    insight_text = generate_insight(df, health, total_anomalies)
+    insight = [
+        html.Div(
+            style={"display": "flex", "alignItems": "center", "gap": "10px",
+                   "marginBottom": "12px"},
+            children=[
+                html.Span("🤖", style={"fontSize": "20px"}),
+                html.H3("AI System Insight", style={"margin": "0", "fontSize": "16px",
+                                                      "color": WHITE, "fontWeight": "600"}),
+            ],
+        ),
+        html.P(insight_text, style={"color": MUTED, "fontSize": "14px",
+                                     "lineHeight": "1.7", "margin": "0"}),
+    ]
+
+    event_rows = []
+    for c, label in [("pH_anomaly", "pH"), ("TDS_anomaly", "TDS"), ("temp_anomaly", "Temp")]:
+        if c in df.columns:
+            mask = df[c]
+            for ts, row in df[mask].iterrows():
+                sensor_col = {"pH_anomaly": "pH", "TDS_anomaly": "TDS", "temp_anomaly": "water_temp"}[c]
+                event_rows.append({
+                    "Timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                    "Sensor": label,
+                    "Value": round(row.get(sensor_col, 0), 2),
+                    "Type": "Anomaly",
+                })
+
+    event_rows = sorted(event_rows, key=lambda r: r["Timestamp"], reverse=True)[:50]
+
+    events_header = html.Div(
+        style={"display": "flex", "alignItems": "center", "gap": "10px",
+               "marginBottom": "16px"},
+        children=[
+            html.Span("📋", style={"fontSize": "20px"}),
+            html.H3("Recent Events", style={"margin": "0", "fontSize": "16px",
+                                              "color": WHITE, "fontWeight": "600"}),
+            html.Span(
+                f"{len(event_rows)} events",
+                style={"fontSize": "12px", "color": MUTED,
+                       "background": BG_ALT, "padding": "2px 10px",
+                       "borderRadius": "12px"},
+            ),
+        ],
+    )
+
+    if event_rows:
+        events_table = dash_table.DataTable(
+            data=event_rows,
+            columns=[
+                {"name": "Timestamp", "id": "Timestamp"},
+                {"name": "Sensor", "id": "Sensor"},
+                {"name": "Value", "id": "Value"},
+                {"name": "Type", "id": "Type"},
+            ],
+            page_size=10,
+            style_table={"overflowX": "auto"},
+            style_header={
+                "backgroundColor": BG_ALT,
+                "color": MUTED,
+                "fontWeight": "600",
+                "fontSize": "12px",
+                "textTransform": "uppercase",
+                "letterSpacing": "0.5px",
+                "border": "none",
+                "borderBottom": f"1px solid {CARD_BORDER}",
+            },
+            style_cell={
+                "backgroundColor": CARD,
+                "color": WHITE,
+                "fontSize": "13px",
+                "border": "none",
+                "borderBottom": f"1px solid {CARD_BORDER}",
+                "padding": "10px 16px",
+                "textAlign": "left",
+            },
+            style_data_conditional=[
+                {
+                    "if": {"filter_query": '{Type} = "Anomaly"'},
+                    "color": RED,
+                    "fontWeight": "600",
+                },
+            ],
+        )
+    else:
+        events_table = html.P(
+            "No events in the selected range.",
+            style={"color": MUTED, "fontSize": "13px"},
+        )
+
+    events_children = [events_header, events_table]
+
+    return (
+        kpi_health_val,
+        kpi_anomalies_val,
+        kpi_stability_val,
+        kpi_ts_val,
+        charts,
+        insight,
+        events_children,
+    )
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, port=8050)
